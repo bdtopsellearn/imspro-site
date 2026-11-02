@@ -1,0 +1,275 @@
+import {
+    r as e
+} from "./mapp-_ZvHbzIw.js";
+import {
+    h as t,
+    t as n
+} from "./mapp-Do8coFm2.js";
+import {
+    i as r,
+    o as i,
+    t as a
+} from "./mapp-WAYq8zpi.js";
+var o = e(t(), 1),
+    s = n();
+
+function c({
+    item: e,
+    allowedTransitions: t,
+    onClose: n,
+    onSubmit: c
+}) {
+    let l = t[e.status.toLowerCase()] || [],
+        [u, d] = (0, o.useState)(l[0] || ``),
+        [f, p] = (0, o.useState)(e.tx_id || ``),
+        [m, h] = (0, o.useState)(e.admin_note || ``),
+        [g, _] = (0, o.useState)(!1),
+        v = e => new Intl.NumberFormat(`en-US`, {
+            style: `currency`,
+            currency: `USD`
+        }).format(e || 0),
+        y = async () => {
+            if (!(!u || g)) {
+                _(!0);
+                try {
+                    await c(u, m, f)
+                } finally {
+                    _(!1)
+                }
+            }
+        }, b = async e => {
+            try {
+                await navigator.clipboard.writeText(e), i.success(`Copied`)
+            } catch {
+                i.error(`Could not copy`)
+            }
+        }, x = e.fields && e.fields.length > 0 ? e.fields : e.wallet_address ? [{
+            label: `Address`,
+            value: e.wallet_address
+        }] : [];
+    return (0, s.jsx)(`div`, {
+        className: `au-modal-bd`,
+        onClick: n,
+        children: (0, s.jsxs)(`div`, {
+            className: `au-modal`,
+            onClick: e => e.stopPropagation(),
+            children: [(0, s.jsxs)(`div`, {
+                className: `au-modal-head`,
+                children: [(0, s.jsxs)(`div`, {
+                    children: [(0, s.jsx)(`h3`, {
+                        children: `Manage Payment`
+                    }), (0, s.jsxs)(`div`, {
+                        className: `meta`,
+                        children: [`WID: `, e.wid, ` • UID: `, e.uid]
+                    })]
+                }), (0, s.jsx)(`button`, {
+                    className: `au-modal-close`,
+                    onClick: n,
+                    children: (0, s.jsx)(r, {
+                        name: `times`
+                    })
+                })]
+            }), (0, s.jsxs)(`div`, {
+                className: `au-modal-body`,
+                children: [(0, s.jsxs)(`div`, {
+                    className: `au-modal-info`,
+                    children: [(0, s.jsxs)(`div`, {
+                        className: `au-modal-info-row`,
+                        children: [(0, s.jsx)(`span`, {
+                            className: `key`,
+                            children: `Amount`
+                        }), (0, s.jsx)(`span`, {
+                            className: `val`,
+                            children: v(e.net_amount)
+                        })]
+                    }), (0, s.jsxs)(`div`, {
+                        className: `au-modal-info-row`,
+                        children: [(0, s.jsx)(`span`, {
+                            className: `key`,
+                            children: `Method`
+                        }), (0, s.jsx)(`span`, {
+                            className: `val`,
+                            children: e.method_name || `—`
+                        })]
+                    }), (0, s.jsxs)(`div`, {
+                        className: `au-modal-info-row`,
+                        children: [(0, s.jsx)(`span`, {
+                            className: `key`,
+                            children: `Current Status`
+                        }), (0, s.jsx)(`span`, {
+                            className: `val cur`,
+                            children: e.status
+                        })]
+                    })]
+                }), x.length > 0 && (0, s.jsxs)(`div`, {
+                    className: `au-pay-fields`,
+                    children: [(0, s.jsx)(`div`, {
+                        className: `au-pay-fields-title`,
+                        children: `Payment Details`
+                    }), x.map((e, t) => (0, s.jsxs)(`div`, {
+                        className: `au-pay-field`,
+                        children: [(0, s.jsx)(`span`, {
+                            className: `au-pay-field-label`,
+                            children: e.label
+                        }), (0, s.jsxs)(`button`, {
+                            type: `button`,
+                            className: `au-pay-field-val`,
+                            title: `Click to copy`,
+                            onClick: () => b(e.value),
+                            children: [(0, s.jsx)(`span`, {
+                                className: `txt`,
+                                children: e.value
+                            }), (0, s.jsx)(r, {
+                                name: `copy`
+                            })]
+                        })]
+                    }, t))]
+                }), l.length === 0 ? (0, s.jsxs)(`div`, {
+                    style: {
+                        textAlign: `center`,
+                        padding: 16,
+                        color: `var(--text-muted)`,
+                        fontSize: 13
+                    },
+                    children: [`No status changes allowed for "`, e.status, `" payments.`, (0, s.jsx)(`div`, {
+                        style: {
+                            marginTop: 12,
+                            fontSize: 12
+                        },
+                        children: `You can still update the transaction ID and note.`
+                    }), (0, s.jsxs)(`div`, {
+                        style: {
+                            marginTop: 16
+                        },
+                        children: [(0, s.jsx)(`label`, {
+                            className: `au-fld-label`,
+                            style: {
+                                textAlign: `left`
+                            },
+                            children: `Transaction ID`
+                        }), (0, s.jsx)(`input`, {
+                            className: `au-input`,
+                            type: `text`,
+                            value: f,
+                            onChange: e => p(e.target.value),
+                            placeholder: `On-chain TX hash`
+                        })]
+                    }), (0, s.jsxs)(`div`, {
+                        style: {
+                            marginTop: 12
+                        },
+                        children: [(0, s.jsx)(`label`, {
+                            className: `au-fld-label`,
+                            style: {
+                                textAlign: `left`
+                            },
+                            children: `Admin Note`
+                        }), (0, s.jsx)(`textarea`, {
+                            className: `au-input`,
+                            value: m,
+                            onChange: e => h(e.target.value),
+                            rows: 3,
+                            placeholder: `Optional note`
+                        })]
+                    }), (0, s.jsx)(`button`, {
+                        onClick: () => c(e.status, m, f),
+                        disabled: g,
+                        className: `btn btn-primary btn-sm`,
+                        style: {
+                            width: `100%`,
+                            justifyContent: `center`,
+                            marginTop: 14
+                        },
+                        children: g ? (0, s.jsxs)(s.Fragment, {
+                            children: [(0, s.jsx)(r, {
+                                name: `circle-notch`
+                            }), ` Saving…`]
+                        }) : `Save TX / Note`
+                    })]
+                }) : (0, s.jsxs)(s.Fragment, {
+                    children: [(0, s.jsx)(`label`, {
+                        className: `au-fld-label`,
+                        children: `New Status`
+                    }), (0, s.jsx)(a, {
+                        value: u,
+                        onChange: d,
+                        searchable: !1,
+                        options: l.map(e => ({
+                            value: e,
+                            label: e.charAt(0).toUpperCase() + e.slice(1)
+                        }))
+                    }), (0, s.jsx)(`label`, {
+                        className: `au-fld-label`,
+                        style: {
+                            marginTop: 14
+                        },
+                        children: `Transaction ID`
+                    }), (0, s.jsx)(`input`, {
+                        className: `au-input`,
+                        type: `text`,
+                        value: f,
+                        onChange: e => p(e.target.value),
+                        placeholder: `On-chain TX hash (required for completed)`
+                    }), (0, s.jsx)(`label`, {
+                        className: `au-fld-label`,
+                        style: {
+                            marginTop: 14
+                        },
+                        children: `Admin Note`
+                    }), (0, s.jsx)(`textarea`, {
+                        className: `au-input`,
+                        value: m,
+                        onChange: e => h(e.target.value),
+                        rows: 3,
+                        placeholder: `Why this transition? Optional but recommended.`
+                    }), (0, s.jsxs)(`p`, {
+                        className: `au-refund-hint`,
+                        children: [`• Rejected refunds to `, (0, s.jsx)(`b`, {
+                            children: `Locked Balance`
+                        }), `.`, (0, s.jsx)(`br`, {}), `• Failed refunds to `, (0, s.jsx)(`b`, {
+                            children: `Available Balance`
+                        }), `.`, (0, s.jsx)(`br`, {}), `• Cancelled refunds to `, (0, s.jsx)(`b`, {
+                            children: `No Balance`
+                        }), `.`]
+                    }), (0, s.jsxs)(`div`, {
+                        style: {
+                            display: `flex`,
+                            gap: 8,
+                            marginTop: 14
+                        },
+                        children: [(0, s.jsx)(`button`, {
+                            onClick: n,
+                            className: `btn btn-ghost btn-sm`,
+                            style: {
+                                flex: 1,
+                                justifyContent: `center`
+                            },
+                            children: `Cancel`
+                        }), (0, s.jsx)(`button`, {
+                            onClick: y,
+                            disabled: g,
+                            className: `btn btn-primary btn-sm`,
+                            style: {
+                                flex: 1,
+                                justifyContent: `center`
+                            },
+                            children: g ? (0, s.jsxs)(s.Fragment, {
+                                children: [(0, s.jsx)(r, {
+                                    name: `circle-notch`
+                                }), ` Saving…`]
+                            }) : (0, s.jsxs)(s.Fragment, {
+                                children: [`Apply `, (0, s.jsx)(r, {
+                                    name: `arrow-right`
+                                })]
+                            })
+                        })]
+                    })]
+                })]
+            })]
+        })
+    })
+}
+export {
+    c as
+    default
+};

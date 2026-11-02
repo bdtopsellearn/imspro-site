@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: imspro-telephony
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CARRIER_API_TOKEN
+        value: Ect9DpdpkmmYK_3y_XGDzBx_zsF8nzO2AmxfvYEqIWk

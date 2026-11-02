@@ -1,0 +1,6 @@
+{
+  "name": "IMS PRO",
+  "description": "IMS PRO platform and dashboard (imspro.site).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

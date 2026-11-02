@@ -1,0 +1,8 @@
+node_modules/
+.npm/
+.DS_Store
+*.log
+.env
+.env.local
+.aistudio/
+*firebase-adminsdk*.json
