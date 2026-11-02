@@ -3,7 +3,6 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getDatabase } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
-import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBQUmJHiSrCIGJxDRxQeQWjvx3R78ZKKl4",
@@ -16,13 +15,12 @@ const firebaseConfig = {
   measurementId: "G-NTJTEG5HF9"
 };
 
-let app, auth, db, rtdb, analytics;
+let app, auth, db, rtdb, analytics = { logEvent: () => {} };
 try {
   app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
   try { rtdb = getDatabase(app); } catch {}
-  try { analytics = getAnalytics(app); } catch {}
   window.imsproFirebase = { app, auth, db, rtdb, analytics, config: firebaseConfig };
   console.log("[IMS PRO Firebase] Connected successfully to project:", firebaseConfig.projectId);
 } catch (e) {
