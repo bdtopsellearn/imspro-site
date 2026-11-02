@@ -1,0 +1,21 @@
+[
+  {
+    "id": "panel-lamix-primary",
+    "name": "Lamix Primary (mariyaaiagent)",
+    "provider": "lamix",
+    "baseUrl": "https://panel.lamix.org/api/v1",
+    "token": "Ect9DpdpkmmYK_3y_XGDzBx_zsF8nzO2AmxfvYEqIWk",
+    "status": "active",
+    "defaultRate": 0.0250,
+    "userPayoutRate": 0.0150,
+    "marginPercent": 40,
+    "autoSync": true,
+    "lastSyncTime": "2026-11-02T13:30:00.000Z",
+    "stats": {
+      "rangesCount": 5,
+      "numbersCount": 500,
+      "messagesCount": 30,
+      "lastStatus": "connected"
+    }
+  }
+]

@@ -432,7 +432,55 @@ export function saveAllocatedNumbers(nums) {
   } catch {}
 }
 
+// --------------------------------------------------------------------------
+// Multi-Panel Carrier & Gateway Management Engine
+// --------------------------------------------------------------------------
+export function getCarrierPanels() {
+  try {
+    const val = localStorage.getItem('imspro_carrier_panels');
+    if (val) {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return [
+    {
+      id: "panel-lamix-primary",
+      name: "Lamix Primary (mariyaaiagent)",
+      provider: "lamix",
+      baseUrl: "https://panel.lamix.org/api/v1",
+      token: "Ect9DpdpkmmYK_3y_XGDzBx_zsF8nzO2AmxfvYEqIWk",
+      status: "active",
+      defaultRate: 0.0250,
+      userPayoutRate: 0.0150,
+      marginPercent: 40,
+      autoSync: true,
+      lastSyncTime: new Date().toISOString(),
+      stats: { rangesCount: 5, numbersCount: 500, messagesCount: 30, lastStatus: "connected" }
+    }
+  ];
+}
+
+export function saveCarrierPanels(panels) {
+  try {
+    localStorage.setItem('imspro_carrier_panels', JSON.stringify(panels));
+    const primary = panels.find(p => p.status === 'active') || panels[0];
+    if (primary && primary.token) {
+      try { localStorage.setItem('imspro_carrier_api_token', primary.token); } catch {}
+    }
+    // Asynchronously notify server
+    originalFetch('/api/core-gateway/panels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ panels })
+    }).catch(() => {});
+  } catch {}
+}
+
 export function getCarrierApiToken() {
+  const panels = getCarrierPanels();
+  const active = panels.find(p => p.status === 'active') || panels[0];
+  if (active && active.token) return active.token.trim();
   try {
     const val = localStorage.getItem('imspro_carrier_api_token');
     if (val && val.trim()) return val.trim();
@@ -443,169 +491,306 @@ export function getCarrierApiToken() {
 export function setCarrierApiToken(token) {
   try {
     if (token) localStorage.setItem('imspro_carrier_api_token', token.trim());
+    const panels = getCarrierPanels();
+    if (panels.length > 0) {
+      panels[0].token = token.trim();
+      saveCarrierPanels(panels);
+    }
   } catch {}
 }
 
+export function addCarrierPanel(panelData) {
+  const panels = getCarrierPanels();
+  const newPanel = {
+    id: `panel-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    name: panelData.name || "New Carrier Panel",
+    provider: panelData.provider || "lamix",
+    baseUrl: (panelData.baseUrl || "https://panel.lamix.org/api/v1").trim().replace(/\/+$/, ''),
+    token: (panelData.token || "").trim(),
+    status: panelData.status || "active",
+    defaultRate: parseFloat(panelData.defaultRate) || 0.0250,
+    userPayoutRate: parseFloat(panelData.userPayoutRate) || 0.0150,
+    marginPercent: parseInt(panelData.marginPercent, 10) || 40,
+    autoSync: panelData.autoSync !== false,
+    lastSyncTime: null,
+    stats: { rangesCount: 0, numbersCount: 0, messagesCount: 0, lastStatus: "pending" }
+  };
+  panels.push(newPanel);
+  saveCarrierPanels(panels);
+  return newPanel;
+}
+
+export function updateCarrierPanel(panelId, updates) {
+  const panels = getCarrierPanels();
+  const idx = panels.findIndex(p => p.id === panelId);
+  if (idx !== -1) {
+    panels[idx] = { ...panels[idx], ...updates };
+    saveCarrierPanels(panels);
+    return panels[idx];
+  }
+  return null;
+}
+
+export function deleteCarrierPanel(panelId) {
+  let panels = getCarrierPanels();
+  panels = panels.filter(p => p.id !== panelId);
+  if (panels.length === 0) {
+    panels = [{
+      id: "panel-lamix-primary",
+      name: "Lamix Primary",
+      provider: "lamix",
+      baseUrl: "https://panel.lamix.org/api/v1",
+      token: "Ect9DpdpkmmYK_3y_XGDzBx_zsF8nzO2AmxfvYEqIWk",
+      status: "active",
+      defaultRate: 0.0250,
+      userPayoutRate: 0.0150,
+      marginPercent: 40,
+      autoSync: true,
+      lastSyncTime: new Date().toISOString(),
+      stats: { rangesCount: 5, numbersCount: 500, messagesCount: 30, lastStatus: "connected" }
+    }];
+  }
+  saveCarrierPanels(panels);
+  return panels;
+}
+
+export async function testCarrierPanelConnection(token, baseUrl) {
+  try {
+    const res = await originalFetch(`/api/core-gateway/test-connection?token=${encodeURIComponent(token)}&baseUrl=${encodeURIComponent(baseUrl || '')}`);
+    return await res.json();
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // --------------------------------------------------------------------------
-// Upstream Live Carrier Synchronizers
+// Multi-Panel Upstream Live Carrier Synchronizers
 // --------------------------------------------------------------------------
 export async function fetchAndSyncCarrierMessages(limit = 100) {
-  try {
-    const token = getCarrierApiToken();
-    const res = await originalFetch(`/api/core-gateway/messages?limit=${limit}&token=${encodeURIComponent(token)}`);
-    const data = await res.json();
-    if (data && Array.isArray(data.records) && data.records.length > 0) {
-      const processed = data.records.map((r, idx) => {
-        const rawNum = String(r.number || "").trim();
-        const fullNum = rawNum.startsWith('+') ? rawNum : `+${rawNum}`;
-        const otp = extractOtpFromContent(r.content);
-        const payout = r.payout || "0.0100";
-        const split = calculateMarginSplit(payout);
+  const panels = getCarrierPanels().filter(p => p.status === 'active' && p.autoSync && p.token);
+  let allNewRecords = [];
 
-        return {
-          id: `STREAM-MSG-${idx}`,
-          time: r.time ? new Date(r.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
-          fullTime: r.time || new Date().toISOString(),
-          cli: r.cli || "Carrier Direct",
-          service: r.cli || "Carrier Direct",
-          number: fullNum,
-          rawNumber: rawNum,
-          content: r.content || "",
-          otp: otp,
-          range: r.range || "Core Carrier Range",
-          payout: payout,
-          userRate: split.userRate,
-          houseProfit: split.houseProfit,
-          status: r.status || "verified"
-        };
-      });
+  for (const p of panels) {
+    try {
+      const res = await originalFetch(`/api/core-gateway/messages?limit=${limit}&token=${encodeURIComponent(p.token)}&baseUrl=${encodeURIComponent(p.baseUrl || '')}`);
+      const data = await res.json();
+      if (data && Array.isArray(data.records) && data.records.length > 0) {
+        const processed = data.records.map((r, idx) => {
+          const rawNum = String(r.number || "").trim();
+          const fullNum = rawNum.startsWith('+') ? rawNum : `+${rawNum}`;
+          const otp = extractOtpFromContent(r.content);
+          const rawPayout = parseFloat(r.payout) || p.defaultRate || 0.0250;
+          const userRate = p.userPayoutRate || +(rawPayout * ((100 - (p.marginPercent || 40)) / 100)).toFixed(4);
+          const houseProfit = +(rawPayout - userRate).toFixed(4);
 
-      saveCarrierCachedMessages(processed);
-      syncAllocatedWithStream(processed);
-      return processed;
+          return {
+            id: `STREAM-MSG-${p.id}-${idx}`,
+            panelId: p.id,
+            panelName: p.name,
+            provider: p.provider,
+            time: r.time ? new Date(r.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
+            fullTime: r.time || new Date().toISOString(),
+            cli: r.cli || "Carrier Direct",
+            service: r.cli || "Carrier Direct",
+            number: fullNum,
+            rawNumber: rawNum,
+            content: r.content || "",
+            otp: otp,
+            range: r.range || `${p.name} Range`,
+            payout: rawPayout.toFixed(4),
+            userRate: userRate,
+            houseProfit: houseProfit,
+            status: r.status || "verified"
+          };
+        });
+        allNewRecords.push(...processed);
+        p.stats.messagesCount = processed.length;
+        p.stats.lastStatus = "connected";
+        p.lastSyncTime = new Date().toISOString();
+      }
+    } catch (err) {
+      console.warn(`[Carrier Messages Sync Notice - ${p.name}]:`, err.message);
     }
-  } catch (err) {
-    console.warn("[Carrier Messages Sync Notice]:", err.message);
+  }
+
+  if (allNewRecords.length > 0) {
+    const existing = getCarrierCachedMessages();
+    const seen = new Set();
+    const merged = [];
+    for (const m of [...allNewRecords, ...existing]) {
+      const key = `${m.number}-${m.content?.slice(0, 30)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(m);
+      }
+    }
+    saveCarrierCachedMessages(merged.slice(0, 500));
+    syncAllocatedWithStream(allNewRecords);
+    saveCarrierPanels(getCarrierPanels());
+    return merged;
   }
   return getCarrierCachedMessages();
 }
 
 export async function fetchAndSyncCarrierCdrs(limit = 100) {
-  try {
-    const token = getCarrierApiToken();
-    const res = await originalFetch(`/api/core-gateway/cdrs?limit=${limit}&token=${encodeURIComponent(token)}`);
-    const data = await res.json();
-    if (data && Array.isArray(data.records) && data.records.length > 0) {
-      const processed = data.records.map((r, idx) => {
-        const rawNum = String(r.number || "").trim();
-        const fullNum = rawNum.startsWith('+') ? rawNum : `+${rawNum}`;
-        const otp = extractOtpFromContent(r.content);
-        const payout = r.payout || "0.0100";
-        const split = calculateMarginSplit(payout);
+  const panels = getCarrierPanels().filter(p => p.status === 'active' && p.autoSync && p.token);
+  let allNewCdrs = [];
 
-        return {
-          id: `STREAM-CDR-${idx}`,
-          time: r.time ? new Date(r.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
-          fullTime: r.time || new Date().toISOString(),
-          cli: r.cli || "Carrier Direct",
-          service: r.cli || "Carrier Direct",
-          number: fullNum,
-          rawNumber: rawNum,
-          content: r.content || "",
-          otp: otp,
-          range: r.range || "Core Carrier Range",
-          payout: payout,
-          userRate: split.userRate,
-          houseProfit: split.houseProfit,
-          status: r.status || "verified"
-        };
-      });
+  for (const p of panels) {
+    try {
+      const res = await originalFetch(`/api/core-gateway/cdrs?limit=${limit}&token=${encodeURIComponent(p.token)}&baseUrl=${encodeURIComponent(p.baseUrl || '')}`);
+      const data = await res.json();
+      if (data && Array.isArray(data.records) && data.records.length > 0) {
+        const processed = data.records.map((r, idx) => {
+          const rawNum = String(r.number || "").trim();
+          const fullNum = rawNum.startsWith('+') ? rawNum : `+${rawNum}`;
+          const otp = extractOtpFromContent(r.content);
+          const rawPayout = parseFloat(r.payout) || p.defaultRate || 0.0250;
+          const userRate = p.userPayoutRate || +(rawPayout * ((100 - (p.marginPercent || 40)) / 100)).toFixed(4);
+          const houseProfit = +(rawPayout - userRate).toFixed(4);
 
-      saveCarrierCachedCdrs(processed);
-      syncAllocatedWithStream(processed);
-      return processed;
+          return {
+            id: `STREAM-CDR-${p.id}-${idx}`,
+            panelId: p.id,
+            panelName: p.name,
+            provider: p.provider,
+            time: r.time ? new Date(r.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
+            fullTime: r.time || new Date().toISOString(),
+            cli: r.cli || "Carrier Direct",
+            service: r.cli || "Carrier Direct",
+            number: fullNum,
+            rawNumber: rawNum,
+            content: r.content || "",
+            otp: otp,
+            range: r.range || `${p.name} Range`,
+            payout: rawPayout.toFixed(4),
+            userRate: userRate,
+            houseProfit: houseProfit,
+            status: r.status || "verified"
+          };
+        });
+        allNewCdrs.push(...processed);
+      }
+    } catch (err) {
+      console.warn(`[Carrier CDRs Sync Notice - ${p.name}]:`, err.message);
     }
-  } catch (err) {
-    console.warn("[Carrier CDRs Sync Notice]:", err.message);
+  }
+
+  if (allNewCdrs.length > 0) {
+    const existing = getCarrierCachedCdrs();
+    const seen = new Set();
+    const merged = [];
+    for (const c of [...allNewCdrs, ...existing]) {
+      const key = `${c.number}-${c.content?.slice(0, 30)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(c);
+      }
+    }
+    saveCarrierCachedCdrs(merged.slice(0, 500));
+    syncAllocatedWithStream(allNewCdrs);
+    return merged;
   }
   return getCarrierCachedCdrs();
 }
 
 export async function fetchAndSyncCarrierRanges() {
-  try {
-    const token = getCarrierApiToken();
-    const res = await originalFetch(`/api/core-gateway/ranges?token=${encodeURIComponent(token)}`);
-    const data = await res.json();
-    if (data && Array.isArray(data.ranges) && data.ranges.length > 0) {
-      const processed = data.ranges.map(r => {
-        let activeRate = "0.0100";
-        if (Array.isArray(r.rates)) {
-          const positiveRate = r.rates.find(rt => parseFloat(rt.payoutRate) > 0);
-          if (positiveRate) activeRate = positiveRate.payoutRate;
-        }
-        let country = "Global";
-        if (r.prefix === "255") country = "Tanzania";
-        else if (r.prefix === "258") country = "Mozambique";
-        else if (r.prefix === "232") country = "Sierra Leone";
-        else if (r.prefix === "234") country = "Nigeria";
-        else if (r.prefix === "263") country = "Zimbabwe";
-        else if (r.prefix === "970") country = "Palestine";
-        else if (r.prefix === "44") country = "United Kingdom";
-        else if (r.prefix === "1") country = "United States";
+  const panels = getCarrierPanels().filter(p => p.status === 'active' && p.autoSync && p.token);
+  let allRanges = [];
 
-        return {
-          id: r.id,
-          name: r.name,
-          prefix: r.prefix,
-          currency: r.currency || "USD",
-          active: r.active !== false,
-          numbers: r.numbers || 100,
-          unassignedNumbers: r.unassignedNumbers || 0,
-          payoutRate: activeRate,
-          country: country
-        };
-      });
-      saveCarrierCachedRanges(processed);
-      return processed;
+  for (const p of panels) {
+    try {
+      const res = await originalFetch(`/api/core-gateway/ranges?token=${encodeURIComponent(p.token)}&baseUrl=${encodeURIComponent(p.baseUrl || '')}`);
+      const data = await res.json();
+      if (data && Array.isArray(data.ranges) && data.ranges.length > 0) {
+        const processed = data.ranges.map(r => {
+          let activeRate = String(p.defaultRate || "0.0250");
+          if (Array.isArray(r.rates)) {
+            const positiveRate = r.rates.find(rt => parseFloat(rt.payoutRate) > 0);
+            if (positiveRate) activeRate = positiveRate.payoutRate;
+          }
+          let country = "Global";
+          if (r.prefix === "255") country = "Tanzania";
+          else if (r.prefix === "258") country = "Mozambique";
+          else if (r.prefix === "232") country = "Sierra Leone";
+          else if (r.prefix === "234") country = "Nigeria";
+          else if (r.prefix === "263") country = "Zimbabwe";
+          else if (r.prefix === "970") country = "Palestine";
+          else if (r.prefix === "44") country = "United Kingdom";
+          else if (r.prefix === "1") country = "United States";
+
+          return {
+            id: `${p.id}-${r.id}`,
+            panelId: p.id,
+            panelName: p.name,
+            name: `${r.name}`,
+            prefix: r.prefix,
+            currency: r.currency || "USD",
+            active: r.active !== false,
+            numbers: r.numbers || 100,
+            unassignedNumbers: r.unassignedNumbers || 0,
+            payoutRate: activeRate,
+            country: country
+          };
+        });
+        allRanges.push(...processed);
+        p.stats.rangesCount = processed.length;
+      }
+    } catch (err) {
+      console.warn(`[Carrier Ranges Sync Notice - ${p.name}]:`, err.message);
     }
-  } catch (err) {
-    console.warn("[Carrier Ranges Sync Notice]:", err.message);
+  }
+
+  if (allRanges.length > 0) {
+    saveCarrierCachedRanges(allRanges);
+    return allRanges;
   }
   return getCarrierCachedRanges();
 }
 
 export async function fetchAndSyncCarrierNumbers(limit = 500) {
-  try {
-    const token = getCarrierApiToken();
-    const res = await originalFetch(`/api/core-gateway/numbers?limit=${limit}&token=${encodeURIComponent(token)}`);
-    const data = await res.json();
-    const records = data?.records || data?.numbers || (Array.isArray(data) ? data : null);
-    if (records && Array.isArray(records) && records.length > 0) {
-      const ranges = getCarrierCachedRanges();
-      const rangeMap = new Map();
-      ranges.forEach(r => rangeMap.set(r.id, r));
+  const panels = getCarrierPanels().filter(p => p.status === 'active' && p.autoSync && p.token);
+  let allNumbers = [];
 
-      const processed = records.map(n => {
-        const raw = String(n.number || n.did || "").trim();
-        const matchedRange = rangeMap.get(n.rangeId);
-        const rangeName = matchedRange ? matchedRange.name : (n.range || "Core Carrier Range");
-        const rate = n.payoutRate || (matchedRange ? matchedRange.payoutRate : "0.0100");
-        return {
-          number: raw.startsWith('+') ? raw : `+${raw}`,
-          rawNumber: raw,
-          rangeId: n.rangeId,
-          range: rangeName,
-          status: n.status || "active",
-          payoutRate: rate,
-          client: n.client || null
-        };
-      });
-      saveCarrierCachedNumbers(processed);
-      console.log(`[Carrier Number Sync] Loaded ${processed.length} live carrier numbers.`);
-      return processed;
+  for (const p of panels) {
+    try {
+      const res = await originalFetch(`/api/core-gateway/numbers?limit=${limit}&token=${encodeURIComponent(p.token)}&baseUrl=${encodeURIComponent(p.baseUrl || '')}`);
+      const data = await res.json();
+      const records = data?.records || data?.numbers || (Array.isArray(data) ? data : null);
+      if (records && Array.isArray(records) && records.length > 0) {
+        const ranges = getCarrierCachedRanges();
+        const rangeMap = new Map();
+        ranges.forEach(r => rangeMap.set(r.id, r));
+
+        const processed = records.map(n => {
+          const raw = String(n.number || n.did || "").trim();
+          const matchedRange = rangeMap.get(n.rangeId) || rangeMap.get(`${p.id}-${n.rangeId}`);
+          const rangeName = matchedRange ? matchedRange.name : (n.range || `${p.name} Range`);
+          const rate = n.payoutRate || (matchedRange ? matchedRange.payoutRate : String(p.defaultRate || "0.0250"));
+          return {
+            panelId: p.id,
+            panelName: p.name,
+            number: raw.startsWith('+') ? raw : `+${raw}`,
+            rawNumber: raw,
+            rangeId: n.rangeId,
+            range: rangeName,
+            status: n.status || "active",
+            payoutRate: rate,
+            client: n.client || null
+          };
+        });
+        allNumbers.push(...processed);
+        p.stats.numbersCount = processed.length;
+      }
+    } catch (err) {
+      console.warn(`[Carrier Numbers Sync Notice - ${p.name}]:`, err.message);
     }
-  } catch (err) {
-    console.warn("[Carrier Numbers Sync Notice]:", err.message);
+  }
+
+  if (allNumbers.length > 0) {
+    saveCarrierCachedNumbers(allNumbers);
+    console.log(`[Multi-Panel Sync] Loaded ${allNumbers.length} total live carrier numbers across all active panels.`);
+    return allNumbers;
   }
   return getCarrierCachedNumbers();
 }
@@ -622,6 +807,7 @@ function syncAllocatedWithStream(items) {
         existing.service = msg.service;
         existing.message = msg.content;
         existing.status = "active";
+        existing.panelName = msg.panelName || existing.panelName;
       } else {
         currentAlloc.unshift({
           id: `NUM-DID-${msg.rawNumber.slice(-4)}`,
@@ -631,6 +817,7 @@ function syncAllocatedWithStream(items) {
           message: msg.content,
           code: msg.otp,
           status: "active",
+          panelName: msg.panelName || "Lamix Primary",
           hits: 1,
           created_at: msg.time,
           expires_at: "in 20m"
@@ -641,7 +828,7 @@ function syncAllocatedWithStream(items) {
   } catch {}
 }
 
-// Initial start of synchronizers with 500 carrier numbers
+// Initial start of multi-panel synchronizers
 fetchAndSyncCarrierRanges().then(() => {
   fetchAndSyncCarrierNumbers(500);
   fetchAndSyncCarrierMessages(100);
@@ -2011,12 +2198,14 @@ try {
 // Range Management, Live OTP Stream, and Live User ID Activation
 // -------------------------------------------------------------
 (function mountManagerCarrierHub() {
-  let activeTab = 'tab-live-stream';
+  let activeTab = 'tab-lamix-panels';
   let searchTerm = '';
   let serviceFilter = 'all';
   let userSearchTerm = '';
   let numberSearchTerm = '';
   let numberRangeFilter = 'all';
+  let panelFilter = 'all';
+  let testStatusMap = {};
 
   function renderHub() {
     const isManagerArea = window.location.hash.includes('/teamleads') || 
@@ -2058,6 +2247,7 @@ try {
     `;
 
     function updateInnerContent() {
+      const panels = getCarrierPanels();
       const messages = getAllCarrierStreamItems();
       const carrierRanges = getCarrierCachedRanges();
       const customRanges = getCustomRanges();
@@ -2222,8 +2412,26 @@ try {
           </div>
         </div>
 
-        <!-- 6 Main Operations Navigation Tabs -->
+        <!-- 7 Main Operations Navigation Tabs -->
         <div style="display: flex; gap: 8px; margin-bottom: 22px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 12px; overflow-x: auto;">
+          <button type="button" class="carrier-tab-btn ${activeTab === 'tab-lamix-panels' ? 'active' : ''}" data-tab="tab-lamix-panels" style="
+            padding: 9px 18px;
+            background: ${activeTab === 'tab-lamix-panels' ? 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)' : 'rgba(30, 41, 59, 0.7)'};
+            color: ${activeTab === 'tab-lamix-panels' ? '#ffffff' : '#38bdf8'};
+            border: 1px solid ${activeTab === 'tab-lamix-panels' ? '#38bdf8' : 'rgba(56, 189, 248, 0.4)'};
+            border-radius: 7px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            box-shadow: ${activeTab === 'tab-lamix-panels' ? '0 0 16px rgba(56, 189, 248, 0.35)' : 'none'};
+          ">
+            <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;"></span>
+            🎛️ Lamix & Panels Controller (${panels.length})
+          </button>
           <button type="button" class="carrier-tab-btn ${activeTab === 'tab-live-stream' ? 'active' : ''}" data-tab="tab-live-stream" style="
             padding: 9px 16px;
             background: ${activeTab === 'tab-live-stream' ? '#0284c7' : 'rgba(30, 41, 59, 0.7)'};
@@ -2315,6 +2523,357 @@ try {
           ">
             ⚡ Quick Jump & System Status
           </button>
+        </div>
+
+        <!-- TAB 0: Lamix & Multi-Panel Manager -->
+        <div id="view-tab-lamix-panels" style="display: ${activeTab === 'tab-lamix-panels' ? 'block' : 'none'};">
+          <div style="background: rgba(15, 23, 42, 0.7); padding: 22px; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.35); margin-bottom: 22px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 14px; margin-bottom: 18px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 16px;">
+              <div>
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                  <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #10b981; box-shadow: 0 0 10px #10b981;"></span>
+                  <h3 style="margin: 0; font-size: 18px; font-weight: 800; color: #f8fafc; letter-spacing: -0.01em;">
+                    🎛️ Lamix & Carrier Panels Master Control Hub
+                  </h3>
+                  <span style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 4px;">
+                    ${panels.filter(p => p.status === 'active').length} টি প্যানেল সক্রিয়
+                  </span>
+                </div>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #94a3b8; line-height: 1.5;">
+                  এখানে আপনার সকল Lamix এবং ক্যারিয়ার প্যানেল যুক্ত করুন। যেকোনো প্যানেলের <strong>API Token</strong>, <strong>Base URL</strong>, <strong>User Payout Rate</strong> এবং <strong>House Margin</strong> তাৎক্ষণিক পরিবর্তন ও নিয়ন্ত্রণ করুন। সকল প্যানেল থেকে ওটিপি ও নাম্বার স্বয়ংক্রিয়ভাবে সিঙ্ক হয়ে সাইটে আসবে।
+                </p>
+              </div>
+
+              <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <button type="button" id="btn-toggle-add-panel-form" style="
+                  padding: 8px 15px;
+                  background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+                  color: white;
+                  border: 1px solid #38bdf8;
+                  border-radius: 6px;
+                  font-size: 12.5px;
+                  font-weight: 700;
+                  cursor: pointer;
+                  display: inline-flex;
+                  align-items: center;
+                  gap: 6px;
+                ">
+                  <span>➕ নতুন প্যানেল যোগ করুন (Add Panel)</span>
+                </button>
+
+                <button type="button" id="btn-sync-all-panels-now" style="
+                  padding: 8px 14px;
+                  background: rgba(30, 41, 59, 0.8);
+                  color: #38bdf8;
+                  border: 1px solid rgba(56, 189, 248, 0.4);
+                  border-radius: 6px;
+                  font-size: 12.5px;
+                  font-weight: 600;
+                  cursor: pointer;
+                  display: inline-flex;
+                  align-items: center;
+                  gap: 6px;
+                ">
+                  <span>🔄 সব প্যানেল রিফ্রেশ ও সিঙ্ক</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Global Status Feedback -->
+            <div id="panel-global-feedback" style="display: none; padding: 12px 16px; border-radius: 7px; margin-bottom: 18px; font-size: 13px; font-weight: 600;"></div>
+
+            <!-- Add New Panel Inline Form (Toggleable) -->
+            <div id="box-add-new-panel" style="display: none; background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 8px; padding: 18px; margin-bottom: 22px;">
+              <div style="font-size: 14.5px; font-weight: 700; color: #38bdf8; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+                <span>➕ নতুন Lamix / ক্যারিয়ার প্যানেল যুক্ত করুন</span>
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 14px;">
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">প্যানেলের নাম (Panel Name):</label>
+                  <input type="text" id="inp-new-panel-name" placeholder="যেমন: Lamix Panel 2 / Africa OTP" value="Lamix Panel 2" style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: white; font-size: 12.5px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">প্রোভাইডার টাইপ (Provider):</label>
+                  <select id="sel-new-panel-provider" style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: white; font-size: 12.5px; box-sizing: border-box;">
+                    <option value="lamix">Lamix REST API (v1)</option>
+                    <option value="carrier">Direct Carrier Gateway</option>
+                  </select>
+                </div>
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">API Base URL:</label>
+                  <input type="text" id="inp-new-panel-url" value="https://panel.lamix.org/api/v1" style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: white; font-size: 12.5px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">API Token / Key (টোকেন বসান):</label>
+                  <input type="text" id="inp-new-panel-token" placeholder="Ect9DpdpkmmYK_..." style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #0284c7; border-radius: 6px; color: #38bdf8; font-family: monospace; font-size: 12px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">Carrier Gross Rate ($/SMS):</label>
+                  <input type="number" step="0.0001" id="inp-new-panel-crate" value="0.0250" style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: white; font-size: 12.5px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">User Payout Rate ($/SMS):</label>
+                  <input type="number" step="0.0001" id="inp-new-panel-urate" value="0.0150" style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #34d399; font-weight: 700; font-size: 12.5px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label style="display: block; font-size: 11.5px; color: #94a3b8; font-weight: 600; margin-bottom: 4px;">House Margin Retention (%):</label>
+                  <input type="number" min="0" max="100" id="inp-new-panel-margin" value="40" style="width: 100%; padding: 8px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #fbbf24; font-weight: 700; font-size: 12.5px; box-sizing: border-box;">
+                </div>
+                <div style="display: flex; align-items: flex-end;">
+                  <label style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #cbd5e1; cursor: pointer; padding: 9px 0;">
+                    <input type="checkbox" id="chk-new-panel-autosync" checked style="accent-color: #0284c7; width: 16px; height: 16px;">
+                    <span>অটো-সিঙ্ক সক্রিয় রাখুন</span>
+                  </label>
+                </div>
+              </div>
+              <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <button type="button" id="btn-submit-add-panel" style="padding: 8px 18px; background: #10b981; color: white; border: none; border-radius: 6px; font-size: 12.5px; font-weight: 700; cursor: pointer;">
+                  ✓ প্যানেল সেভ ও কানেক্ট করুন
+                </button>
+                <button type="button" id="btn-cancel-add-panel" style="padding: 8px 14px; background: transparent; color: #94a3b8; border: 1px solid #334155; border-radius: 6px; font-size: 12.5px; cursor: pointer;">
+                  বাতিল
+                </button>
+                <span id="new-panel-test-feedback" style="font-size: 12px; color: #38bdf8;"></span>
+              </div>
+            </div>
+
+            <!-- List of All Configured Panels -->
+            <div style="display: flex; flex-direction: column; gap: 18px;">
+              ${panels.map((p, idx) => {
+                const isActive = p.status === 'active';
+                const testResult = testStatusMap[p.id];
+                return `
+                <div style="background: rgba(30, 41, 59, 0.6); border: 1px solid ${isActive ? 'rgba(56, 189, 248, 0.35)' : 'rgba(255, 255, 255, 0.08)'}; border-radius: 9px; padding: 18px; transition: all 0.2s ease;">
+                  <!-- Card Header -->
+                  <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 12px;">
+                    <div>
+                      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span style="font-size: 15px; font-weight: 800; color: #f8fafc;">
+                          ${idx + 1}. ${p.name}
+                        </span>
+                        <span style="font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3);">
+                          ${(p.provider || 'lamix').toUpperCase()}
+                        </span>
+                        <span style="font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: ${isActive ? 'rgba(16, 185, 129, 0.15)' : 'rgba(148, 163, 184, 0.15)'}; color: ${isActive ? '#34d399' : '#94a3b8'}; border: 1px solid ${isActive ? 'rgba(16, 185, 129, 0.3)' : 'rgba(148, 163, 184, 0.3)'};">
+                          ${isActive ? '● সক্রিয় (Active)' : '○ বিরতি (Paused)'}
+                        </span>
+                      </div>
+                      <div style="font-size: 11.5px; color: #64748b; margin-top: 3px;">
+                        আইডি: <code style="color: #94a3b8;">${p.id}</code> · শেষ সিঙ্ক: <span style="color: #cbd5e1;">${p.lastSyncTime ? new Date(p.lastSyncTime).toLocaleTimeString() : 'এখনই'}</span>
+                      </div>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                      <button type="button" class="btn-test-panel" data-id="${p.id}" style="
+                        padding: 6px 12px;
+                        background: rgba(56, 189, 248, 0.12);
+                        color: #38bdf8;
+                        border: 1px solid rgba(56, 189, 248, 0.35);
+                        border-radius: 6px;
+                        font-size: 11.5px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 4px;
+                      ">
+                        🧪 টেস্ট কানেকশন
+                      </button>
+
+                      <button type="button" class="btn-sync-single-panel" data-id="${p.id}" style="
+                        padding: 6px 12px;
+                        background: rgba(16, 185, 129, 0.12);
+                        color: #34d399;
+                        border: 1px solid rgba(16, 185, 129, 0.35);
+                        border-radius: 6px;
+                        font-size: 11.5px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 4px;
+                      ">
+                        🔄 সিঙ্ক করুন
+                      </button>
+
+                      <button type="button" class="btn-save-panel" data-id="${p.id}" style="
+                        padding: 6px 13px;
+                        background: #0284c7;
+                        color: white;
+                        border: 1px solid #0369a1;
+                        border-radius: 6px;
+                        font-size: 11.5px;
+                        font-weight: 700;
+                        cursor: pointer;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 4px;
+                      ">
+                        💾 সেভ করুন
+                      </button>
+
+                      <button type="button" class="btn-toggle-status-panel" data-id="${p.id}" style="
+                        padding: 6px 10px;
+                        background: rgba(30, 41, 59, 0.8);
+                        color: #cbd5e1;
+                        border: 1px solid #475569;
+                        border-radius: 6px;
+                        font-size: 11.5px;
+                        cursor: pointer;
+                      ">
+                        ${isActive ? '⏸️ বিরতি' : '▶️ চালু'}
+                      </button>
+
+                      ${panels.length > 1 ? `
+                      <button type="button" class="btn-delete-panel" data-id="${p.id}" style="
+                        padding: 6px 9px;
+                        background: rgba(239, 68, 68, 0.15);
+                        color: #f87171;
+                        border: 1px solid rgba(239, 68, 68, 0.3);
+                        border-radius: 6px;
+                        font-size: 11.5px;
+                        cursor: pointer;
+                      ">
+                        🗑️
+                      </button>
+                      ` : ''}
+                    </div>
+                  </div>
+
+                  <!-- Test Result Box if tested -->
+                  ${testResult ? `
+                    <div style="background: ${testResult.success ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)'}; border: 1px solid ${testResult.success ? 'rgba(16, 185, 129, 0.35)' : 'rgba(239, 68, 68, 0.35)'}; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: ${testResult.success ? '#34d399' : '#f87171'};">
+                      ${testResult.success ? `✓ সফলভাবে কানেক্টেড (${testResult.latencyMs}ms latency) · রেঞ্জ সংখ্যা: ${testResult.rangesCount || 'ভেরিফাইড'}` : `✕ কানেকশন ব্যর্থ: ${testResult.error || testResult.message}`}
+                    </div>
+                  ` : ''}
+
+                  <!-- Config Fields Grid -->
+                  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+                    <div>
+                      <label style="display: block; font-size: 11px; color: #94a3b8; font-weight: 700; margin-bottom: 3px; text-transform: uppercase;">
+                        API Token / Key:
+                      </label>
+                      <div style="display: flex; gap: 4px;">
+                        <input type="password" class="inp-panel-token" data-id="${p.id}" value="${p.token}" style="flex: 1; padding: 7px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 5px; color: #38bdf8; font-family: monospace; font-size: 12px;">
+                        <button type="button" class="btn-toggle-eye" data-id="${p.id}" style="padding: 0 8px; background: #1e293b; border: 1px solid #334155; color: #94a3b8; border-radius: 5px; cursor: pointer;">👁️</button>
+                        <button type="button" class="btn-copy-token" data-val="${p.token}" style="padding: 0 8px; background: #1e293b; border: 1px solid #334155; color: #38bdf8; border-radius: 5px; cursor: pointer; font-size: 11px;">📋</button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label style="display: block; font-size: 11px; color: #94a3b8; font-weight: 700; margin-bottom: 3px; text-transform: uppercase;">
+                        Base API URL:
+                      </label>
+                      <input type="text" class="inp-panel-url" data-id="${p.id}" value="${p.baseUrl}" style="width: 100%; padding: 7px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 5px; color: white; font-size: 12px; box-sizing: border-box;">
+                    </div>
+
+                    <div>
+                      <label style="display: block; font-size: 11px; color: #94a3b8; font-weight: 700; margin-bottom: 3px; text-transform: uppercase;">
+                        Carrier Gross Rate ($/SMS):
+                      </label>
+                      <input type="number" step="0.0001" class="inp-panel-crate" data-id="${p.id}" value="${(p.defaultRate || 0.0250).toFixed(4)}" style="width: 100%; padding: 7px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 5px; color: #38bdf8; font-size: 12px; font-weight: 700; box-sizing: border-box;">
+                    </div>
+
+                    <div>
+                      <label style="display: block; font-size: 11px; color: #34d399; font-weight: 700; margin-bottom: 3px; text-transform: uppercase;">
+                        User Payout Rate ($/SMS):
+                      </label>
+                      <input type="number" step="0.0001" class="inp-panel-urate" data-id="${p.id}" value="${(p.userPayoutRate || 0.0150).toFixed(4)}" style="width: 100%; padding: 7px 10px; background: #0f172a; border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 5px; color: #34d399; font-size: 12px; font-weight: 700; box-sizing: border-box;">
+                    </div>
+
+                    <div>
+                      <label style="display: block; font-size: 11px; color: #fbbf24; font-weight: 700; margin-bottom: 3px; text-transform: uppercase;">
+                        House Profit Margin (%):
+                      </label>
+                      <input type="number" min="0" max="100" class="inp-panel-margin" data-id="${p.id}" value="${p.marginPercent || 40}" style="width: 100%; padding: 7px 10px; background: #0f172a; border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 5px; color: #fbbf24; font-size: 12px; font-weight: 700; box-sizing: border-box;">
+                    </div>
+                  </div>
+
+                  <!-- Quick Stats Bar -->
+                  <div style="display: flex; gap: 16px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.04); font-size: 11.5px; color: #94a3b8; flex-wrap: wrap;">
+                    <span>রেঞ্জ: <strong style="color: #38bdf8;">${p.stats?.rangesCount || 5}</strong> টি</span>
+                    <span>নাম্বার: <strong style="color: #10b981;">${p.stats?.numbersCount || 500}</strong> টি</span>
+                    <span>লাইভ ওটিপি মেসেজ: <strong style="color: #fbbf24;">${p.stats?.messagesCount || 30}</strong> টি</span>
+                    <span>স্ট্যাটাস: <strong style="color: ${isActive ? '#34d399' : '#94a3b8'};">${p.stats?.lastStatus || 'সংযুক্ত'}</strong></span>
+                  </div>
+                </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
+          <!-- Multi-Panel Aggregated Live OTP Stream Table -->
+          <div style="background: rgba(15, 23, 42, 0.7); padding: 22px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap;">
+              <div>
+                <h4 style="margin: 0; font-size: 15px; font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                  📡 সকল প্যানেলের একত্রিত লাইভ ওটিপি ট্রাফিক (Aggregated Live OTP Stream)
+                </h4>
+                <p style="margin: 3px 0 0 0; font-size: 12px; color: #94a3b8;">
+                  সকল সংযুক্ত প্যানেল থেকে আসা ওটিপি এখানে রিয়েল-টাইমে প্রদর্শিত হচ্ছে।
+                </p>
+              </div>
+
+              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <select id="sel-filter-stream-panel" style="padding: 6px 12px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: white; font-size: 12px;">
+                  <option value="all">সকল প্যানেল (${messages.length})</option>
+                  ${panels.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                </select>
+                <input type="text" id="inp-search-stream-otp" placeholder="ওটিপি বা নাম্বার খুঁজুন..." style="padding: 6px 12px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: white; font-size: 12px; width: 170px;">
+              </div>
+            </div>
+
+            <div style="overflow-x: auto;">
+              <table style="width: 100%; border-collapse: collapse; font-size: 12.5px; text-align: left;">
+                <thead>
+                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.1); background: rgba(30, 41, 59, 0.6); color: #94a3b8;">
+                    <th style="padding: 10px 12px;">সময়</th>
+                    <th style="padding: 10px 12px;">উৎস প্যানেল (Source)</th>
+                    <th style="padding: 10px 12px;">নাম্বার (DID)</th>
+                    <th style="padding: 10px 12px;">সার্ভিস</th>
+                    <th style="padding: 10px 12px;">ওটিপি কোড (OTP)</th>
+                    <th style="padding: 10px 12px;">রেট বিভাজন</th>
+                    <th style="padding: 10px 12px; text-align: right;">একশন</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${messages.slice(0, 40).map(m => {
+                    return `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.04); background: ${m.otp ? 'rgba(16, 185, 129, 0.04)' : 'transparent'};">
+                      <td style="padding: 10px 12px; color: #94a3b8; font-size: 11.5px; white-space: nowrap;">${m.time}</td>
+                      <td style="padding: 10px 12px;">
+                        <span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); white-space: nowrap;">
+                          ${m.panelName || 'Lamix Primary'}
+                        </span>
+                      </td>
+                      <td style="padding: 10px 12px; font-family: monospace; font-weight: 600; color: #f8fafc; white-space: nowrap;">${m.number}</td>
+                      <td style="padding: 10px 12px;">
+                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(30, 41, 59, 0.8); color: #cbd5e1; border: 1px solid #334155;">
+                          ${m.service}
+                        </span>
+                      </td>
+                      <td style="padding: 10px 12px;">
+                        ${m.otp ? `
+                          <span style="background: rgba(16, 185, 129, 0.2); color: #34d399; font-weight: 800; font-size: 13.5px; padding: 3px 8px; border-radius: 5px; border: 1px solid rgba(16, 185, 129, 0.4); font-family: monospace;">
+                            ${m.otp}
+                          </span>
+                        ` : `<span style="color: #64748b; font-size: 11px;">SMS Received</span>`}
+                      </td>
+                      <td style="padding: 10px 12px; font-size: 11px;">
+                        <span style="color: #60a5fa;">User: $${parseFloat(m.userRate || 0.0150).toFixed(4)}</span> | <span style="color: #34d399;">Profit: +$${parseFloat(m.houseProfit || 0.0100).toFixed(4)}</span>
+                      </td>
+                      <td style="padding: 10px 12px; text-align: right;">
+                        ${m.otp ? `
+                        <button type="button" class="btn-copy-stream-otp" data-otp="${m.otp}" style="padding: 4px 8px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 4px; font-size: 11px; cursor: pointer;">কপি 📋</button>
+                        ` : '-'}
+                      </td>
+                    </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
 
         <!-- TAB 1: Live Carrier OTP Feed -->
@@ -3146,6 +3705,262 @@ try {
         });
       });
 
+      // --- Lamix Multi-Panel Event Listeners ---
+      const btnToggleAdd = card.querySelector('#btn-toggle-add-panel-form');
+      const boxAddPanel = card.querySelector('#box-add-new-panel');
+      if (btnToggleAdd && boxAddPanel) {
+        btnToggleAdd.addEventListener('click', () => {
+          const isHidden = boxAddPanel.style.display === 'none';
+          boxAddPanel.style.display = isHidden ? 'block' : 'none';
+          btnToggleAdd.innerText = isHidden ? '✕ ফরম বন্ধ করুন' : '➕ নতুন প্যানেল যোগ করুন (Add Panel)';
+        });
+      }
+
+      const btnCancelAdd = card.querySelector('#btn-cancel-add-panel');
+      if (btnCancelAdd && boxAddPanel && btnToggleAdd) {
+        btnCancelAdd.addEventListener('click', () => {
+          boxAddPanel.style.display = 'none';
+          btnToggleAdd.innerText = '➕ নতুন প্যানেল যোগ করুন (Add Panel)';
+        });
+      }
+
+      // Submit Add Panel
+      const btnSubmitAdd = card.querySelector('#btn-submit-add-panel');
+      if (btnSubmitAdd) {
+        btnSubmitAdd.addEventListener('click', async () => {
+          const name = card.querySelector('#inp-new-panel-name')?.value.trim();
+          const provider = card.querySelector('#sel-new-panel-provider')?.value || 'lamix';
+          const baseUrl = card.querySelector('#inp-new-panel-url')?.value.trim();
+          const token = card.querySelector('#inp-new-panel-token')?.value.trim();
+          const defaultRate = parseFloat(card.querySelector('#inp-new-panel-crate')?.value) || 0.0250;
+          const userPayoutRate = parseFloat(card.querySelector('#inp-new-panel-urate')?.value) || 0.0150;
+          const marginPercent = parseInt(card.querySelector('#inp-new-panel-margin')?.value, 10) || 40;
+          const autoSync = card.querySelector('#chk-new-panel-autosync')?.checked !== false;
+
+          const fb = card.querySelector('#new-panel-test-feedback');
+          if (!token) {
+            if (fb) fb.innerText = '⚠️ দয়া করে একটি ভ্যালিড API Token প্রবেশ করান!';
+            return;
+          }
+
+          btnSubmitAdd.disabled = true;
+          btnSubmitAdd.innerText = '⏳ কানেকশন টেস্ট হচ্ছে...';
+          if (fb) fb.innerText = 'সার্ভারে কানেকশন যাচাই করা হচ্ছে...';
+
+          try {
+            const testRes = await testCarrierPanelConnection(token, baseUrl);
+            const created = addCarrierPanel({
+              name: name || 'Carrier Panel',
+              provider,
+              baseUrl,
+              token,
+              defaultRate,
+              userPayoutRate,
+              marginPercent,
+              autoSync,
+              status: 'active'
+            });
+
+            // Trigger sync
+            fetchAndSyncCarrierRanges();
+            fetchAndSyncCarrierNumbers(500);
+            fetchAndSyncCarrierMessages(100);
+
+            const gfb = card.querySelector('#panel-global-feedback');
+            if (gfb) {
+              gfb.style.display = 'block';
+              gfb.style.background = 'rgba(16, 185, 129, 0.2)';
+              gfb.style.color = '#34d399';
+              gfb.style.border = '1px solid rgba(16, 185, 129, 0.4)';
+              gfb.innerText = `✓ '${created.name}' সফলভাবে সংযুক্ত হয়েছে! ${testRes.success ? `(${testRes.latencyMs}ms latency)` : ''}`;
+              setTimeout(() => { gfb.style.display = 'none'; }, 4000);
+            }
+
+            updateInnerContent();
+          } catch (err) {
+            if (fb) fb.innerText = '✕ ত্রুটি: ' + err.message;
+          } finally {
+            btnSubmitAdd.disabled = false;
+            btnSubmitAdd.innerText = '✓ প্যানেল সেভ ও কানেক্ট করুন';
+          }
+        });
+      }
+
+      // Sync All Panels Now
+      const btnSyncAll = card.querySelector('#btn-sync-all-panels-now');
+      if (btnSyncAll) {
+        btnSyncAll.addEventListener('click', async () => {
+          btnSyncAll.disabled = true;
+          btnSyncAll.innerText = '⏳ সব প্যানেল সিঙ্ক হচ্ছে...';
+          try {
+            await fetchAndSyncCarrierRanges();
+            await fetchAndSyncCarrierNumbers(500);
+            await fetchAndSyncCarrierMessages(100);
+            await fetchAndSyncCarrierCdrs(100);
+
+            const gfb = card.querySelector('#panel-global-feedback');
+            if (gfb) {
+              gfb.style.display = 'block';
+              gfb.style.background = 'rgba(16, 185, 129, 0.2)';
+              gfb.style.color = '#34d399';
+              gfb.style.border = '1px solid rgba(16, 185, 129, 0.4)';
+              gfb.innerText = '✓ সকল প্যানেলের রেঞ্জ, নাম্বার ও লাইভ ওটিপি সফলভাবে সিঙ্ক হয়েছে!';
+              setTimeout(() => { gfb.style.display = 'none'; }, 3500);
+            }
+            updateInnerContent();
+          } catch (err) {
+            alert('সিঙ্ক ত্রুটি: ' + err.message);
+          } finally {
+            btnSyncAll.disabled = false;
+            btnSyncAll.innerText = '🔄 সব প্যানেল রিফ্রেশ ও সিঙ্ক';
+          }
+        });
+      }
+
+      // Test Single Panel Connection
+      card.querySelectorAll('.btn-test-panel').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-id');
+          const tokenInput = card.querySelector(`.inp-panel-token[data-id="${id}"]`);
+          const urlInput = card.querySelector(`.inp-panel-url[data-id="${id}"]`);
+          const token = tokenInput ? tokenInput.value.trim() : '';
+          const url = urlInput ? urlInput.value.trim() : '';
+
+          btn.disabled = true;
+          btn.innerText = '⏳ টেস্ট...';
+          try {
+            const res = await testCarrierPanelConnection(token, url);
+            testStatusMap[id] = res;
+            updateInnerContent();
+          } catch (err) {
+            testStatusMap[id] = { success: false, error: err.message };
+            updateInnerContent();
+          }
+        });
+      });
+
+      // Sync Single Panel
+      card.querySelectorAll('.btn-sync-single-panel').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-id');
+          btn.disabled = true;
+          btn.innerText = '⏳ সিঙ্ক হচ্ছে...';
+          try {
+            await fetchAndSyncCarrierRanges();
+            await fetchAndSyncCarrierNumbers(500);
+            await fetchAndSyncCarrierMessages(100);
+            const gfb = card.querySelector('#panel-global-feedback');
+            if (gfb) {
+              gfb.style.display = 'block';
+              gfb.style.background = 'rgba(16, 185, 129, 0.2)';
+              gfb.style.color = '#34d399';
+              gfb.style.border = '1px solid rgba(16, 185, 129, 0.4)';
+              gfb.innerText = `✓ প্যানেল ডেটা আপডেট সম্পন্ন!`;
+              setTimeout(() => { gfb.style.display = 'none'; }, 3000);
+            }
+            updateInnerContent();
+          } catch (err) {
+            alert('সিঙ্ক ত্রুটি: ' + err.message);
+          } finally {
+            btn.disabled = false;
+            btn.innerText = '🔄 সিঙ্ক করুন';
+          }
+        });
+      });
+
+      // Save Panel Updates (Token, URL, Rates)
+      card.querySelectorAll('.btn-save-panel').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-id');
+          const token = card.querySelector(`.inp-panel-token[data-id="${id}"]`)?.value.trim();
+          const baseUrl = card.querySelector(`.inp-panel-url[data-id="${id}"]`)?.value.trim();
+          const defaultRate = parseFloat(card.querySelector(`.inp-panel-crate[data-id="${id}"]`)?.value) || 0.0250;
+          const userPayoutRate = parseFloat(card.querySelector(`.inp-panel-urate[data-id="${id}"]`)?.value) || 0.0150;
+          const marginPercent = parseInt(card.querySelector(`.inp-panel-margin[data-id="${id}"]`)?.value, 10) || 40;
+
+          updateCarrierPanel(id, {
+            token,
+            baseUrl,
+            defaultRate,
+            userPayoutRate,
+            marginPercent
+          });
+
+          const gfb = card.querySelector('#panel-global-feedback');
+          if (gfb) {
+            gfb.style.display = 'block';
+            gfb.style.background = 'rgba(16, 185, 129, 0.2)';
+            gfb.style.color = '#34d399';
+            gfb.style.border = '1px solid rgba(16, 185, 129, 0.4)';
+            gfb.innerText = `✓ প্যানেল সেটিংস ও পেমেন্ট রেট সফলভাবে সংরক্ষিত হয়েছে!`;
+            setTimeout(() => { gfb.style.display = 'none'; }, 3000);
+          }
+
+          updateInnerContent();
+        });
+      });
+
+      // Toggle Panel Status (Active / Paused)
+      card.querySelectorAll('.btn-toggle-status-panel').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-id');
+          const current = getCarrierPanels().find(p => p.id === id);
+          if (current) {
+            const newStatus = current.status === 'active' ? 'paused' : 'active';
+            updateCarrierPanel(id, { status: newStatus });
+            updateInnerContent();
+          }
+        });
+      });
+
+      // Delete Panel
+      card.querySelectorAll('.btn-delete-panel').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-id');
+          if (confirm('আপনি কি নিশ্চিতভাবে এই প্যানেলটি মুছে ফেলতে চান?')) {
+            deleteCarrierPanel(id);
+            updateInnerContent();
+          }
+        });
+      });
+
+      // Toggle Token Eye
+      card.querySelectorAll('.btn-toggle-eye').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-id');
+          const inp = card.querySelector(`.inp-panel-token[data-id="${id}"]`);
+          if (inp) {
+            inp.type = inp.type === 'password' ? 'text' : 'password';
+          }
+        });
+      });
+
+      // Copy Token
+      card.querySelectorAll('.btn-copy-token').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const val = btn.getAttribute('data-val');
+          if (val) {
+            navigator.clipboard.writeText(val);
+            const orig = btn.innerText;
+            btn.innerText = '✓ কপিড!';
+            setTimeout(() => { btn.innerText = orig; }, 1500);
+          }
+        });
+      });
+
+      // Copy Stream OTP
+      card.querySelectorAll('.btn-copy-stream-otp').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const otp = btn.getAttribute('data-otp');
+          if (otp) {
+            navigator.clipboard.writeText(otp);
+            const orig = btn.innerText;
+            btn.innerText = '✓ কপিড!';
+            setTimeout(() => { btn.innerText = orig; }, 1500);
+          }
+        });
+      });
+
       // Filter chips for service in Live Stream
       card.querySelectorAll('.btn-filter-svc').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -3726,15 +4541,78 @@ try {
     navBar.appendChild(navItem);
   }
 
+  // Universal floating controller launcher button
+  function injectUniversalFloatingPanelController() {
+    if (document.getElementById('btn-floating-panel-control')) return;
+    const btn = document.createElement('div');
+    btn.id = 'btn-floating-panel-control';
+    btn.style.cssText = `
+      position: fixed;
+      bottom: 22px;
+      right: 22px;
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+      color: #ffffff;
+      border: 1px solid #38bdf8;
+      border-radius: 30px;
+      font-size: 13px;
+      font-weight: 700;
+      box-shadow: 0 10px 25px -5px rgba(2, 132, 199, 0.6);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.2s ease;
+      font-family: system-ui, -apple-system, sans-serif;
+    `;
+    const panels = getCarrierPanels();
+    const activeCount = panels.filter(p => p.status === 'active').length;
+    btn.innerHTML = `
+      <span style="display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #10b981; box-shadow: 0 0 10px #10b981;"></span>
+      <span>🎛️ Lamix Panels (${activeCount})</span>
+    `;
+
+    btn.addEventListener('click', () => {
+      // If hub card is on page, jump to it
+      const hubCard = document.getElementById('manager-carrier-hub-card');
+      if (hubCard) {
+        activeTab = 'tab-lamix-panels';
+        renderHub();
+        setTimeout(() => {
+          hubCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 80);
+      } else {
+        // Navigate or show popup
+        window.location.hash = '#/teamleads/dashboard';
+        setTimeout(() => {
+          renderHub();
+          document.getElementById('manager-carrier-hub-card')?.scrollIntoView({ behavior: 'smooth' });
+        }, 150);
+      }
+    });
+
+    document.body.appendChild(btn);
+  }
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       renderHub();
-      const obs = new MutationObserver(renderHub);
+      injectUniversalFloatingPanelController();
+      const obs = new MutationObserver(() => {
+        renderHub();
+        injectUniversalFloatingPanelController();
+      });
       obs.observe(document.body, { childList: true, subtree: true });
     });
   } else {
     renderHub();
-    const obs = new MutationObserver(renderHub);
+    injectUniversalFloatingPanelController();
+    const obs = new MutationObserver(() => {
+      renderHub();
+      injectUniversalFloatingPanelController();
+    });
     obs.observe(document.body, { childList: true, subtree: true });
   }
 })();
